@@ -99,15 +99,19 @@ class Config:
             self.backbone_device = "cpu"
             logger.info("Using CPU for backbone")
 
-        if os.getenv("CODEC_REPO"):
-            self.codec_repo = os.getenv("CODEC_REPO")
-        else:
-            if ONNX_AVAILABLE:
-                self.codec_repo = "neuphonic/neucodec-onnx-decoder"
-                logger.info("Using ONNX decoder (optimized)")
-            else:
+        codec_repo_env = os.getenv("CODEC_REPO")
+        if codec_repo_env and codec_repo_env.strip():
+            # Check if user is trying to use ONNX decoder
+            if "onnx" in codec_repo_env.lower():
+                logger.warning("⚠️  ONNX decoder cannot encode reference audio. Switching to PyTorch codec.")
                 self.codec_repo = "neuphonic/neucodec"
-                logger.info("Using PyTorch decoder (fallback)")
+            else:
+                self.codec_repo = codec_repo_env
+        else:
+            # ONNX decoder can't encode reference audio, so we must use PyTorch codec
+            # ONNX is only used for decoding in streaming mode
+            self.codec_repo = "neuphonic/neucodec"
+            logger.info("Using PyTorch codec (required for reference encoding)")
 
         codec_device_env = os.getenv("CODEC_DEVICE", "cpu").lower()
         if codec_device_env == "cuda" and CUDA_AVAILABLE:
@@ -142,6 +146,7 @@ def get_tts_engine():
             codec_repo=codec_repo,
             codec_device=config.codec_device
         )
+        logger.info(f"✓ TTS Engine initialized successfully")
     return tts_engine
 
 # Reference audio and text caching with LRU cache
@@ -251,7 +256,7 @@ async def startup_event():
     # Show dependency status
     logger.info("\n🔧 Dependencies Status:")
     logger.info(f"  ✓ llama-cpp-python: {'Available' if GGUI_AVAILABLE else 'Not Available'}")
-    logger.info(f"  ✓ onnxruntime: {'Available' if ONNX_AVAILABLE else 'Not Available'}")
+    logger.info(f"  ✓ onnxruntime: {'Available' if ONNX_AVAILABLE else 'Not Available (Note: ONNX decoder only supports decoding)'}")
     logger.info(f"  ✓ CUDA: {'Available' if CUDA_AVAILABLE else 'Not Available'}")
 
     # Show model configuration
@@ -260,6 +265,11 @@ async def startup_event():
     logger.info(f"  Backbone Device: {config.backbone_device}")
     logger.info(f"  Codec: {config.codec_repo}")
     logger.info(f"  Codec Device: {config.codec_device}")
+
+    # Debug: Show environment variables
+    logger.info("\n🔍 Environment Variables Debug:")
+    logger.info(f"  CODEC_REPO from env: '{os.getenv('CODEC_REPO')}'")
+    logger.info(f"  Final config.codec_repo: '{config.codec_repo}'")
 
     # Preload model
     logger.info("\n⏳ Preloading TTS engine...")
