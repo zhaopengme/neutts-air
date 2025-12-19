@@ -251,7 +251,7 @@ Available voices (OpenAI-compatible):
 - `nova` - Female voice (maps to samples/jo.wav)
 - `shimmer` - Female voice (maps to samples/jo.wav)
 
-**Note**: Only `wav` format is currently supported. Other formats will be returned as wav.
+**Note**: Supports `wav` format (audio stream) and `json` format (base64 audio with alignment data).
 
 #### List Voices
 ```http
@@ -315,6 +315,78 @@ response = client.audio.speech.create(
 )
 
 response.stream_to_file("output.wav")
+```
+
+#### JSON Response Example
+
+For applications that need alignment data or base64 audio:
+
+```http
+POST /v1/audio/speech
+Content-Type: application/json
+
+{
+  "model": "tts-1",
+  "input": "Hello world!",
+  "voice": "alloy",
+  "response_format": "json"
+}
+```
+
+Response:
+```json
+{
+  "audio_base64": "UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAA...",
+  "alignment": {
+    "characters": ["H", "e", "l", "l", "o", " ", "w", "o", "r", "l", "d", "!"],
+    "characterStartTimesSeconds": [0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.275, 0.325, 0.375, 0.425, 0.475, 0.525],
+    "characterEndTimesSeconds": [0.05, 0.1, 0.15, 0.2, 0.25, 0.275, 0.325, 0.375, 0.425, 0.475, 0.525, 0.55]
+  }
+}
+```
+
+#### JavaScript Example with JSON Format
+
+```javascript
+const response = await fetch('http://localhost:8000/v1/audio/speech', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    model: 'tts-1',
+    input: 'Hello world!',
+    voice: 'alloy',
+    response_format: 'json'
+  })
+});
+
+const data = await response.json();
+const { audio_base64, alignment } = data;
+
+// Convert base64 to audio blob
+const audioBlob = base64ToBlob(audio_base64, 'audio/wav');
+const audioUrl = URL.createObjectURL(audioBlob);
+
+// Play the audio
+const audio = new Audio(audioUrl);
+audio.play();
+
+// Use alignment data for visualization
+alignment.characters.forEach((char, i) => {
+  const start = alignment.characterStartTimesSeconds[i];
+  const end = alignment.characterEndTimesSeconds[i];
+  console.log(`"${char}" at ${start.toFixed(2)}s - ${end.toFixed(2)}s`);
+});
+
+// Helper function to convert base64 to blob
+function base64ToBlob(base64, mimeType) {
+  const byteCharacters = atob(base64);
+  const byteNumbers = new Array(byteCharacters.length);
+  for (let i = 0; i < byteCharacters.length; i++) {
+    byteNumbers[i] = byteCharacters.charCodeAt(i);
+  }
+  const byteArray = new Uint8Array(byteNumbers);
+  return new Blob([byteArray], { type: mimeType });
+}
 ```
 
 ## Disclaimer

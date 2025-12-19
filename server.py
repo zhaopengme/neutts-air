@@ -3,11 +3,12 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Literal, List
 import os
 import io
 import logging
 from datetime import datetime
+import base64
 
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
@@ -27,7 +28,16 @@ class TTSRequest(BaseModel):
     model: str = Field(default="tts-1", description="Model to use for TTS")
     input: str = Field(..., min_length=1, max_length=4096, description="Text to synthesize")
     voice: str = Field(default="alloy", description="Voice to use (alloy, echo, fable, onyx, nova, shimmer)")
-    response_format: Literal["wav"] = Field(default="wav", description="Audio format (only wav is currently supported)")
+    response_format: Literal["wav", "json"] = Field(default="wav", description="Audio format: wav or json (json returns base64 audio with alignment)")
+
+class AlignmentInfo(BaseModel):
+    characters: List[str]
+    characterStartTimesSeconds: List[float]
+    characterEndTimesSeconds: List[float]
+
+class TTSJSONResponse(BaseModel):
+    audio_base64: str
+    alignment: AlignmentInfo
 
 # Configuration
 class Config:
@@ -80,6 +90,42 @@ async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(sec
             headers={"WWW-Authenticate": "Bearer"},
         )
     return credentials
+
+def wav_to_base64(wav_array, sample_rate: int = 24000) -> str:
+    """Convert numpy array to base64-encoded WAV string"""
+    buffer = io.BytesIO()
+    sf.write(buffer, wav_array, sample_rate, format='WAV')
+    buffer.seek(0)
+    return base64.b64encode(buffer.read()).decode('utf-8')
+
+def estimate_alignment(text: str, duration: float) -> AlignmentInfo:
+    """Estimate character-level timing based on text and audio duration"""
+    # Basic estimation - distribute time evenly
+    char_duration = duration / len(text) if text else 0
+
+    characters = list(text)
+    start_times = []
+    end_times = []
+
+    current_time = 0.0
+    for char in characters:
+        # Adjust duration for punctuation (shorter) and spaces (minimal)
+        if char == ' ':
+            char_time = char_duration * 0.1  # Spaces take 10% of normal time
+        elif char in '.,;:!?':
+            char_time = char_duration * 0.5  # Punctuation takes 50% of normal time
+        else:
+            char_time = char_duration
+
+        start_times.append(current_time)
+        end_times.append(current_time + char_time)
+        current_time += char_time
+
+    return AlignmentInfo(
+        characters=characters,
+        characterStartTimesSeconds=start_times,
+        characterEndTimesSeconds=end_times
+    )
 
 # Voice mapping from OpenAI voices to local samples
 VOICE_MAPPING = {
@@ -181,22 +227,33 @@ async def create_speech(
         # Generate audio
         wav = engine.infer(request.input, ref_codes, ref_text)
 
-        # Save to buffer
-        audio_buffer = io.BytesIO()
-        sf.write(audio_buffer, wav, 24000, format='WAV')
-        audio_buffer.seek(0)
+        # Handle different response formats
+        if request.response_format == "json":
+            # Return JSON response with base64 audio and alignment
+            audio_b64 = wav_to_base64(wav)
+            duration = len(wav) / 24000  # Calculate duration from sample rate
+            alignment = estimate_alignment(request.input, duration)
 
-        # Return streaming response
-        return StreamingResponse(
-            io.BytesIO(audio_buffer.read()),
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
-            }
-        )
+            return TTSJSONResponse(audio_base64=audio_b64, alignment=alignment)
+        else:
+            # Return audio stream (default WAV format)
+            audio_buffer = io.BytesIO()
+            sf.write(audio_buffer, wav, 24000, format='WAV')
+            audio_buffer.seek(0)
 
+            return StreamingResponse(
+                io.BytesIO(audio_buffer.read()),
+                media_type="audio/wav",
+                headers={
+                    "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
+                }
+            )
+
+    except HTTPException:
+        # Re-raise HTTP exceptions as-is
+        raise
     except Exception as e:
-        logger.error(f"Error processing TTS request: {str(e)}")
+        logger.error(f"Error processing TTS request: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating speech: {str(e)}"
