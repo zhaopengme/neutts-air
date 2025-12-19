@@ -11,3 +11,10 @@ resemble-perth==1.0.1
 fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-dotenv==1.0.0
+aiofiles==23.2.1
+
+# Required for GGUF models (CPU optimized)
+llama-cpp-python>=0.2.23
+
+# Required for ONNX decoder
+onnxruntime>=1.16.0

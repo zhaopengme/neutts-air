@@ -9,6 +9,8 @@ import io
 import logging
 from datetime import datetime
 import base64
+import aiofiles
+from functools import lru_cache
 
 from dotenv import load_dotenv
 load_dotenv()  # Load environment variables from .env file
@@ -19,6 +21,36 @@ import soundfile as sf
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Check dependencies
+GGUI_AVAILABLE = False
+ONNX_AVAILABLE = False
+CUDA_AVAILABLE = False
+
+try:
+    import llama_cpp
+    GGUI_AVAILABLE = True
+    logger.info("✓ llama-cpp-python found - GGUF models supported")
+except ImportError:
+    logger.warning("✗ llama-cpp-python not found - GGUF models not supported")
+
+try:
+    import onnxruntime
+    ONNX_AVAILABLE = True
+    logger.info("✓ onnxruntime found - ONNX decoder supported")
+except ImportError:
+    logger.warning("✗ onnxruntime not found - ONNX decoder not supported")
+
+try:
+    import torch
+    CUDA_AVAILABLE = torch.cuda.is_available()
+    if CUDA_AVAILABLE:
+        logger.info("✓ CUDA available - GPU acceleration supported")
+    else:
+        logger.info("- CUDA not available - using CPU")
+except ImportError:
+    logger.warning("✗ PyTorch not found")
+    CUDA_AVAILABLE = False
 
 # Security
 security = HTTPBearer()
@@ -48,11 +80,42 @@ class Config:
         self.api_key = os.getenv("API_KEY")
         self.require_auth = bool(self.api_key)
 
-        # TTS Model Configuration
-        self.backbone_repo = os.getenv("BACKBONE_REPO")  # None means use default
-        self.backbone_device = os.getenv("BACKBONE_DEVICE", "cpu")
-        self.codec_repo = os.getenv("CODEC_REPO")  # None means use default
-        self.codec_device = os.getenv("CODEC_DEVICE", "cpu")
+        # TTS Model Configuration - intelligent defaults based on available dependencies
+        if os.getenv("BACKBONE_REPO"):
+            self.backbone_repo = os.getenv("BACKBONE_REPO")
+        else:
+            if GGUI_AVAILABLE:
+                self.backbone_repo = "neuphonic/neutts-air-q8-gguf"
+                logger.info("Using GGUF model (optimized)")
+            else:
+                self.backbone_repo = "neuphonic/neutts-air"
+                logger.info("Using PyTorch model (fallback)")
+
+        backbone_device_env = os.getenv("BACKBONE_DEVICE", "cpu").lower()
+        if backbone_device_env == "cuda" and CUDA_AVAILABLE:
+            self.backbone_device = "cuda"
+            logger.info("Using GPU for backbone")
+        else:
+            self.backbone_device = "cpu"
+            logger.info("Using CPU for backbone")
+
+        if os.getenv("CODEC_REPO"):
+            self.codec_repo = os.getenv("CODEC_REPO")
+        else:
+            if ONNX_AVAILABLE:
+                self.codec_repo = "neuphonic/neucodec-onnx-decoder"
+                logger.info("Using ONNX decoder (optimized)")
+            else:
+                self.codec_repo = "neuphonic/neucodec"
+                logger.info("Using PyTorch decoder (fallback)")
+
+        codec_device_env = os.getenv("CODEC_DEVICE", "cpu").lower()
+        if codec_device_env == "cuda" and CUDA_AVAILABLE:
+            self.codec_device = "cuda"
+            logger.info("Using GPU for codec")
+        else:
+            self.codec_device = "cpu"
+            logger.info("Using CPU for codec")
 
         # Logging Configuration
         log_level = os.getenv("LOG_LEVEL", "INFO")
@@ -80,6 +143,30 @@ def get_tts_engine():
             codec_device=config.codec_device
         )
     return tts_engine
+
+# Reference audio and text caching with LRU cache
+ref_texts_cache = {}
+
+@lru_cache(maxsize=10)
+def get_cached_ref_codes(voice: str):
+    """获取缓存的参考音频编码（LRU缓存，最多10个语音）"""
+    engine = get_tts_engine()
+    ref_audio_path = f"samples/{voice}.wav"
+    logger.info(f"Cached reference codes for voice: {voice}")
+    return engine.encode_reference(ref_audio_path)
+
+async def get_cached_ref_text(voice: str):
+    """获取缓存的参考文本（简单缓存，最多10个语音）"""
+    if voice not in ref_texts_cache:
+        ref_text_path = f"samples/{voice}.txt"
+        async with aiofiles.open(ref_text_path, 'r') as f:
+            ref_texts_cache[voice] = await f.read()
+        # 如果缓存超过10个，删除最旧的
+        if len(ref_texts_cache) > 10:
+            # 删除第一个（最旧的）条目
+            oldest_key = next(iter(ref_texts_cache))
+            del ref_texts_cache[oldest_key]
+    return ref_texts_cache[voice]
 
 # Authentication
 async def verify_api_key(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -155,17 +242,48 @@ app.add_middleware(
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("=" * 50)
-    logger.info("Starting NeuTTS Air API server...")
+    logger.info("=" * 60)
+    logger.info("NeuTTS Air API Server - Performance Optimized")
+    logger.info("=" * 60)
     logger.info(f"Server will run on {config.host}:{config.port}")
     logger.info(f"Authentication required: {config.require_auth}")
-    if config.require_auth:
-        logger.info("API key authentication is enabled")
-    else:
-        logger.info("API key authentication is disabled (open access)")
-    logger.info("=" * 50)
-    # Preload TTS engine
-    get_tts_engine()
+
+    # Show dependency status
+    logger.info("\n🔧 Dependencies Status:")
+    logger.info(f"  ✓ llama-cpp-python: {'Available' if GGUI_AVAILABLE else 'Not Available'}")
+    logger.info(f"  ✓ onnxruntime: {'Available' if ONNX_AVAILABLE else 'Not Available'}")
+    logger.info(f"  ✓ CUDA: {'Available' if CUDA_AVAILABLE else 'Not Available'}")
+
+    # Show model configuration
+    logger.info("\n📦 Model Configuration:")
+    logger.info(f"  Backbone: {config.backbone_repo}")
+    logger.info(f"  Backbone Device: {config.backbone_device}")
+    logger.info(f"  Codec: {config.codec_repo}")
+    logger.info(f"  Codec Device: {config.codec_device}")
+
+    # Preload model
+    logger.info("\n⏳ Preloading TTS engine...")
+    engine = get_tts_engine()
+
+    # Preload and cache all voice reference encodings
+    logger.info("\n🎵 Preloading voice references...")
+    available_voices = []
+    for voice in ["dave", "jo"]:
+        try:
+            get_cached_ref_codes(voice)
+            await get_cached_ref_text(voice)
+            available_voices.append(voice)
+            logger.info(f"  ✓ Preloaded voice: {voice}")
+        except Exception as e:
+            logger.warning(f"  ✗ Failed to preload voice {voice}: {e}")
+
+    logger.info("\n✅ Server ready!")
+    logger.info(f"Available voices: {', '.join(available_voices)}")
+    logger.info("\n📌 Usage Examples:")
+    logger.info("  curl -X POST http://localhost:8000/v1/audio/speech \\")
+    logger.info("    -H 'Content-Type: application/json' \\")
+    logger.info("    -d '{\"model\":\"tts-1\",\"input\":\"Hello\",\"voice\":\"alloy\"}'")
+    logger.info("=" * 60)
 
 @app.get("/health")
 async def health_check():
@@ -207,22 +325,19 @@ async def create_speech(
             )
 
         local_voice = VOICE_MAPPING[request.voice]
-        ref_text_path = f"samples/{local_voice}.txt"
-        ref_audio_path = f"samples/{local_voice}.wav"
 
         # Check if reference files exist
+        ref_text_path = f"samples/{local_voice}.txt"
+        ref_audio_path = f"samples/{local_voice}.wav"
         if not os.path.exists(ref_text_path) or not os.path.exists(ref_audio_path):
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Reference files for voice '{request.voice}' not found"
             )
 
-        # Read reference text
-        with open(ref_text_path, "r") as f:
-            ref_text = f.read().strip()
-
-        # Encode reference audio
-        ref_codes = engine.encode_reference(ref_audio_path)
+        # Use cached reference data
+        ref_codes = get_cached_ref_codes(local_voice)
+        ref_text = await get_cached_ref_text(local_voice)
 
         # Generate audio
         wav = engine.infer(request.input, ref_codes, ref_text)
