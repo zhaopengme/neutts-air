@@ -6,3 +6,8 @@ soundfile==0.13.1
 torch==2.8.0
 transformers==4.56.1
 resemble-perth==1.0.1
+
+# Server dependencies
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+python-dotenv==1.0.0
